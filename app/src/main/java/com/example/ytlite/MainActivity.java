@@ -9,6 +9,8 @@ import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -68,6 +70,32 @@ public class MainActivity extends Activity {
 
     private static final int REQ_NOTIFICATIONS = 1;
 
+    // Sent to the page when we leave the foreground / come back.
+    private static final String BG_ON_JS = "window.__ytlBg=Date.now();window.__ytlN=0;";
+    private static final String BG_OFF_JS = "window.__ytlBg=0;";
+
+    // Used by PlaybackService (notification Play/Pause button + auto-resume).
+    static final String PLAY_JS =
+            "(function(){var v=document.querySelector('video');"
+            + "if(v&&v.paused){var p=v.play();if(p&&p.catch)p.catch(function(){})}})();";
+    static final String PAUSE_JS =
+            "(function(){window.__ytlBg=0;var v=document.querySelector('video');"
+            + "if(v&&!v.paused)v.pause()})();";
+
+    private static WebView sWebView; // set while the Activity exists
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+    static void runJs(final String js) {
+        final WebView w = sWebView;
+        if (w == null) return;
+        MAIN.post(new Runnable() {
+            @Override
+            public void run() {
+                w.evaluateJavascript(js, null);
+            }
+        });
+    }
+
     // Injected into every page. Compact on purpose (runs on a weak CPU).
     //  - Makes the page believe it is always visible, so YouTube does not
     //    pause playback when the screen turns off.
@@ -77,14 +105,15 @@ public class MainActivity extends Activity {
     // may need updating occasionally.
     private static final String PAGE_JS =
             "(function(){if(window.__ytl)return;window.__ytl=1;"
-            + "try{['hidden','webkitHidden'].forEach(function(k){"
-            + "Object.defineProperty(document,k,{configurable:true,get:function(){return false}})});"
+            + "try{[document,Document.prototype].forEach(function(t){"
+            + "['hidden','webkitHidden'].forEach(function(k){"
+            + "Object.defineProperty(t,k,{configurable:true,get:function(){return false}})});"
             + "['visibilityState','webkitVisibilityState'].forEach(function(k){"
-            + "Object.defineProperty(document,k,{configurable:true,get:function(){return 'visible'}})})}catch(e){}"
-            + "var stop=function(e){e.stopImmediatePropagation()};"
-            + "window.addEventListener('visibilitychange',stop,true);"
-            + "document.addEventListener('visibilitychange',stop,true);"
-            + "window.addEventListener('webkitvisibilitychange',stop,true);"
+            + "Object.defineProperty(t,k,{configurable:true,get:function(){return 'visible'}})})});"
+            + "document.hasFocus=function(){return true}}catch(e){}"
+            + "var stop=function(e){if(e.target===window||e.target===document)e.stopImmediatePropagation()};"
+            + "['visibilitychange','webkitvisibilitychange','blur','pagehide','freeze'].forEach(function(n){"
+            + "window.addEventListener(n,stop,true);document.addEventListener(n,stop,true)});"
             + "var CSS='ytm-promoted-sparkles-web-renderer,ytm-promoted-video-renderer,"
             + "ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-renderer,"
             + "ytm-brand-video-singleton-renderer,#player-ads,.ytp-ad-overlay-container,"
@@ -102,6 +131,10 @@ public class MainActivity extends Activity {
             + "v.muted=true;v.playbackRate=16;"
             + "if(isFinite(v.duration)&&v.duration>0)v.currentTime=v.duration;"
             + "}else if(fast){v.playbackRate=1;v.muted=pm;fast=0}}"
+            + "document.addEventListener('pause',function(e){var v=e.target;"
+            + "if(!window.__ytlBg||!v||v.tagName!=='VIDEO'||v.ended||Date.now()-window.__ytlBg>6000"
+            + "||(window.__ytlN=(window.__ytlN||0)+1)>5)return;"
+            + "setTimeout(function(){var pr=v.play();if(pr&&pr.catch)pr.catch(function(){})},150)},true);"
             + "setInterval(tick,400)})();";
 
     private WebView webView;
@@ -113,6 +146,9 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback customViewCallback;
     private int originalOrientation;
 
+    // True if audio was playing when we left the foreground.
+    private boolean keepPlaying;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -121,6 +157,7 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webView);
         progressBar = findViewById(R.id.progressBar);
         fullscreenContainer = findViewById(R.id.fullscreenContainer);
+        sWebView = webView;
 
         setupWebView();
         askNotificationPermissionIfNeeded();
@@ -359,7 +396,9 @@ public class MainActivity extends Activity {
         // Screen turning off / leaving the app while something is playing:
         // start the foreground service *now*, while the app still counts as
         // being in the foreground (required on newer Android versions).
-        if (!isFinishing() && isAudioPlaying()) {
+        keepPlaying = !isFinishing() && isAudioPlaying();
+        if (keepPlaying) {
+            webView.evaluateJavascript(BG_ON_JS, null);
             startPlaybackService();
         }
     }
@@ -367,6 +406,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        keepPlaying = false;
+        webView.evaluateJavascript(BG_OFF_JS, null);
         webView.onResume();
         stopPlaybackService(); // back on screen: no notification needed
     }
@@ -374,9 +415,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
-        // Only pause the WebView and trim the cache when nothing is playing.
+        // Only pause the WebView and trim the cache when nothing was playing.
         // Pausing it while audio plays is what would cut the sound.
-        if (!isAudioPlaying()) {
+        if (!keepPlaying) {
             webView.onPause();
             trimCacheIfNeeded();
         }
@@ -387,6 +428,7 @@ public class MainActivity extends Activity {
         if (isFinishing()) {
             stopPlaybackService();
         }
+        sWebView = null;
         webView.destroy();
         super.onDestroy();
     }
