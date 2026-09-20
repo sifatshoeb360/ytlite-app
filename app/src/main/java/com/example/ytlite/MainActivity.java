@@ -11,10 +11,12 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -71,32 +73,56 @@ public class MainActivity extends Activity {
 
     private static final int REQ_NOTIFICATIONS = 1;
 
+    // AudioManager.isMusicActive() is global and may lag behind WebView by a
+    // few moments. The JavaScript bridge below gives us the page's real media
+    // state; this short grace period also covers the instant in which Android
+    // backgrounds the page before Activity.onPause() is delivered.
+    private static final long RECENT_PLAYBACK_GRACE_MS = 3000L;
+
     // Sent to the page when we leave the foreground / come back.
-    private static final String BG_ON_JS = "window.__ytlBg=Date.now();window.__ytlN=0;";
+    private static final String BG_ON_JS =
+            "(function(){window.__ytlBg=Date.now();window.__ytlN=0;"
+            + "if(window.__ytlNudge)window.__ytlNudge()})();";
     private static final String BG_OFF_JS = "window.__ytlBg=0;";
 
-    // Used by PlaybackService (notification Play/Pause button + auto-resume).
+    // Used by PlaybackService (notification controls + auto-resume).
     static final String PLAY_JS =
             "(function(){window.__ytlBg=Date.now();window.__ytlN=0;"
+            + "window.__ytlUserPause=0;window.__ytlErr='';"
             + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video'),"
             + "r='p'+(p?1:0)+' v'+(v?1:0);"
             + "if(v)r+=' paused='+(v.paused?1:0)+' rs='+v.readyState+' vis='+document.visibilityState;"
             + "try{if(p&&typeof p.playVideo==='function'){p.playVideo();r+=' api'}"
             + "else if(v){var q=v.play();if(q&&q.catch)q.catch(function(e){window.__ytlErr=e.name});r+=' el'}}"
-            + "catch(e){r+=' err='+e.name}"
-            + "if(window.__ytlNudge)setTimeout(window.__ytlNudge,400);"
+            + "catch(e){window.__ytlErr=e.name;r+=' err='+e.name}"
+            + "if(window.__ytlNudge)setTimeout(function(){window.__ytlNudge()},400);"
             + "return r})();";
     static final String PAUSE_JS =
-            "(function(){window.__ytlBg=0;"
+            "(function(){window.__ytlBg=0;window.__ytlUserPause=Date.now();"
             + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video');"
             + "if(p&&typeof p.pauseVideo==='function')p.pauseVideo();else if(v)v.pause()})();";
-    // Debug: read back what the page did after we pressed play.
-    static final String STATUS_JS =
-            "(function(){var v=document.querySelector('video');"
-            + "return v?('paused='+(v.paused?1:0)+' t='+Math.floor(v.currentTime)+' err='+(window.__ytlErr||'-')):'no video'})();";
 
     private static WebView sWebView; // set while the Activity exists
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static volatile boolean sPagePlaying;
+    private static volatile boolean sHasPlaybackReport;
+    private static volatile boolean sExplicitlyStopped;
+    private static volatile long sLastPagePlayingAt;
+
+    /** Receives lightweight media events from PAGE_JS without polling WebView. */
+    private static final class PlaybackBridge {
+        @JavascriptInterface
+        public void onPlaybackState(boolean playing, boolean explicitlyStopped) {
+            sHasPlaybackReport = true;
+            sPagePlaying = playing;
+            if (playing) {
+                sLastPagePlayingAt = SystemClock.elapsedRealtime();
+                sExplicitlyStopped = false;
+            } else if (explicitlyStopped) {
+                sExplicitlyStopped = true;
+            }
+        }
+    }
 
     static void runJs(String js) {
         runJs(js, null);
@@ -108,13 +134,65 @@ public class MainActivity extends Activity {
         MAIN.post(new Runnable() {
             @Override
             public void run() {
-                w.evaluateJavascript(js, callback);
+                if (w != sWebView) return;
+                try {
+                    w.evaluateJavascript(js, callback);
+                } catch (RuntimeException ignored) {
+                    // The Activity/WebView was destroyed while this was queued.
+                }
             }
         });
     }
 
+    // A background WebView can have its timers suspended. Wake it before a
+    // notification/lock-screen Play command and then execute the command.
+    static void requestPagePlay(final ValueCallback<String> callback) {
+        sExplicitlyStopped = false;
+        final WebView w = sWebView;
+        if (w == null) return;
+        MAIN.post(new Runnable() {
+            @Override
+            public void run() {
+                if (w != sWebView) return;
+                try {
+                    w.onResume();
+                    w.evaluateJavascript(PLAY_JS, callback);
+                } catch (RuntimeException ignored) {
+                    // Best effort: the renderer may have gone away.
+                }
+            }
+        });
+    }
+
+    static void markPagePausedByUser() {
+        sPagePlaying = false;
+        sHasPlaybackReport = true;
+        sExplicitlyStopped = true;
+    }
+
+    static boolean isPagePlaying() {
+        return sPagePlaying;
+    }
+
+    static boolean hasPlaybackReport() {
+        return sHasPlaybackReport;
+    }
+
+    static boolean wasPagePlayingRecently() {
+        long age = SystemClock.elapsedRealtime() - sLastPagePlayingAt;
+        return !sExplicitlyStopped && sLastPagePlayingAt > 0
+                && age >= 0 && age <= RECENT_PLAYBACK_GRACE_MS;
+    }
+
     static boolean hasWebView() {
         return sWebView != null;
+    }
+
+    private static void resetPagePlaybackState() {
+        sPagePlaying = false;
+        sHasPlaybackReport = false;
+        sExplicitlyStopped = false;
+        sLastPagePlayingAt = 0L;
     }
 
     // Injected into every page. Compact on purpose (runs on a weak CPU).
@@ -130,49 +208,43 @@ public class MainActivity extends Activity {
     // YouTube changes its markup from time to time, so the selectors below
     // may need updating occasionally.
     private static final String PAGE_JS =
-            "(function(){if(window.__ytl)return;window.__ytl=1;"
-            + "try{[document,Document.prototype].forEach(function(t){"
-            + "['hidden','webkitHidden'].forEach(function(k){"
-            + "Object.defineProperty(t,k,{configurable:true,get:function(){return false}})});"
-            + "['visibilityState','webkitVisibilityState'].forEach(function(k){"
-            + "Object.defineProperty(t,k,{configurable:true,get:function(){return 'visible'}})})});"
-            + "document.hasFocus=function(){return true}}catch(e){}"
-            + "var stop=function(e){if(e.target===window||e.target===document)e.stopImmediatePropagation()};"
-            + "['visibilitychange','webkitvisibilitychange','blur','pagehide','freeze'].forEach(function(n){"
-            + "window.addEventListener(n,stop,true);document.addEventListener(n,stop,true)});"
-            + "var op=HTMLMediaElement.prototype.pause;"
-            + "HTMLMediaElement.prototype.pause=function(){if(window.__ytlBg)return;return op.apply(this,arguments)};"
-            + "var CSS='ytm-promoted-sparkles-web-renderer,ytm-promoted-video-renderer,"
-            + "ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-renderer,"
-            + "ytm-brand-video-singleton-renderer,#player-ads,.ytp-ad-overlay-container,"
-            + ".ytp-ad-image-overlay{display:none!important}';"
-            + "var fast=0,pm=false;"
-            + "function tick(){"
-            + "if(!document.getElementById('ytl-css')){var r=document.head||document.documentElement;"
-            + "if(r){var s=document.createElement('style');s.id='ytl-css';s.textContent=CSS;r.appendChild(s)}}"
-            + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video');"
-            + "if(!p||!v)return;"
-            + "if(p.classList.contains('ad-showing')){"
-            + "var b=document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button');"
-            + "if(b)b.click();"
-            + "if(!fast){pm=v.muted;fast=1}"
-            + "v.muted=true;v.playbackRate=16;"
-            + "if(isFinite(v.duration)&&v.duration>0)v.currentTime=v.duration;"
-            + "}else if(fast){v.playbackRate=1;v.muted=pm;fast=0}}"
-            + "document.addEventListener('pause',function(e){var v=e.target;"
-            + "if(!window.__ytlBg||!v||v.tagName!=='VIDEO'||v.ended||Date.now()-window.__ytlBg>6000"
-            + "||(window.__ytlN=(window.__ytlN||0)+1)>5)return;"
-            + "setTimeout(function(){var pr=v.play();if(pr&&pr.catch)pr.catch(function(){})},150)},true);"
-            + "window.__ytlNudge=function(){var p=document.querySelector('.html5-video-player'),"
-            + "v=document.querySelector('video');try{"
-            + "if(p&&typeof p.seekTo==='function'&&typeof p.getCurrentTime==='function')p.seekTo(p.getCurrentTime(),true);"
-            + "else if(v&&isFinite(v.currentTime))v.currentTime=v.currentTime}catch(e){}};"
-            + "document.addEventListener('playing',function(e){var v=e.target,"
-            + "p=document.querySelector('.html5-video-player');"
-            + "if(!v||v.tagName!=='VIDEO'||(p&&p.classList.contains('ad-showing'))"
-            + "||window.__ytlPrimed===location.href)return;"
-            + "window.__ytlPrimed=location.href;setTimeout(window.__ytlNudge,1500)},true);"
-            + "setInterval(tick,400)})();";
+            "!function(){if(!window.__ytl){window.__ytl=1;try{[document,Document.prototype].forEach(function(e){["
+            + "\"hidden\",\"webkitHidden\"].forEach(function(t){Object.defineProperty(e,t,{configurable:!0,get:function"
+            + "(){return!1}})}),[\"visibilityState\",\"webkitVisibilityState\"].forEach(function(t){Object.defineProper"
+            + "ty(e,t,{configurable:!0,get:function(){return\"visible\"}})})}),document.hasFocus=function(){return!0}"
+            + "}catch(e){}var e=function(e){e.target!==window&&e.target!==document||e.stopImmediatePropagation()};["
+            + "\"visibilitychange\",\"webkitvisibilitychange\",\"blur\",\"pagehide\",\"freeze\"].forEach(function(t){window.a"
+            + "ddEventListener(t,e,!0),document.addEventListener(t,e,!0)});var t=HTMLMediaElement.prototype.pause;H"
+            + "TMLMediaElement.prototype.pause=function(){if(!window.__ytlBg||window.__ytlUserPause)return t.apply("
+            + "this,arguments)};var n=0,i=!1,o=1,r=\"\",d=\"\";window.__ytlReport=function(){u(document.querySelector(\""
+            + "video\"),!1)},window.__ytlNudge=function(){var e=document.querySelector(\".html5-video-player\"),t=docu"
+            + "ment.querySelector(\"video\");try{if(!t||t.paused||t.ended||t.readyState<2||e&&e.classList.contains(\"a"
+            + "d-showing\"))return!1;var n=Number(t.currentTime);if(!isFinite(n))return!1;var i=n+.25,o=Number(t.dur"
+            + "ation);if(isFinite(o)){if(o<=.5)return!1;i>=o-.05&&(i=Math.max(0,n-.25))}return!(Math.abs(i-n)<.01)&"
+            + "&(e&&\"function\"==typeof e.seekTo?e.seekTo(i,!0):t.currentTime=i,!0)}catch(e){return!1}},document.add"
+            + "EventListener(\"play\",m,!0),document.addEventListener(\"playing\",m,!0),document.addEventListener(\"paus"
+            + "e\",function(e){var t=e.target;t&&\"VIDEO\"===t.tagName&&(u(t,!1),!window.__ytlBg||t.ended||Date.now()-"
+            + "window.__ytlBg>1e4||(window.__ytlN=(window.__ytlN||0)+1)>8||setTimeout(function(){var e=t.play();e&&"
+            + "e.catch&&e.catch(function(){})},150))},!0),document.addEventListener(\"ended\",function(e){u(e.target,"
+            + "!0)},!0),y(),setInterval(y,400)}function u(e,t){if(e&&\"VIDEO\"===e.tagName){var n=!e.paused&&!e.ended"
+            + ",i=!n&&(t||!window.__ytlBg||Date.now()-(window.__ytlUserPause||0)<1500),o=(n?\"1\":\"0\")+(i?\"1\":\"0\");if"
+            + "(o!==r){r=o;try{window.YTLiteBridge&&window.YTLiteBridge.onPlaybackState(n,i)}catch(e){}}}}function "
+            + "l(e,t){try{var n=e&&\"function\"==typeof e.getVideoData&&e.getVideoData();if(n&&n.video_id)return n.vi"
+            + "deo_id}catch(e){}return location.pathname+location.search+\"|\"+(isFinite(t.duration)?Math.floor(10*t."
+            + "duration):\"live\")}function s(e,t){if(!(!t||t.paused||t.ended||e&&e.classList.contains(\"ad-showing\"))"
+            + "){var n=l(e,t);if(window.__ytlPrimed!==n&&d!==n){d=n;var i=0;setTimeout(function e(){var t=document."
+            + "querySelector(\".html5-video-player\"),o=document.querySelector(\"video\");o&&l(t,o)===n?window.__ytlNud"
+            + "ge()?(window.__ytlPrimed=n,d=\"\"):++i<5?setTimeout(e,500):d=\"\":d=\"\"},500)}}}function y(){if(!document"
+            + ".getElementById(\"ytl-css\")){var e=document.head||document.documentElement;if(e){var t=document.creat"
+            + "eElement(\"style\");t.id=\"ytl-css\",t.textContent=\"ytm-promoted-sparkles-web-renderer,ytm-promoted-vide"
+            + "o-renderer,ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-renderer,ytm-brand-video-singleton"
+            + "-renderer,#player-ads,.ytp-ad-overlay-container,.ytp-ad-image-overlay{display:none!important}\",e.app"
+            + "endChild(t)}}var r=document.querySelector(\".html5-video-player\"),a=document.querySelector(\"video\");i"
+            + "f(r&&a)if(u(a,!1),a.paused||s(r,a),r.classList.contains(\"ad-showing\")){var d=document.querySelector("
+            + "\".ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button\");d&&d.click(),n||(i=a.muted,o=a"
+            + ".playbackRate,n=1),a.muted=!0,a.playbackRate=16,isFinite(a.duration)&&a.duration>0&&(a.currentTime=a"
+            + ".duration)}else n&&(a.playbackRate=o,a.muted=i,n=0)}function m(e){var t=e.target,n=document.querySel"
+            + "ector(\".html5-video-player\");t&&\"VIDEO\"===t.tagName&&(u(t,!1),s(n,t))}}();";
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -194,6 +266,7 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webView);
         progressBar = findViewById(R.id.progressBar);
         fullscreenContainer = findViewById(R.id.fullscreenContainer);
+        resetPagePlaybackState();
         sWebView = webView;
 
         setupWebView();
@@ -218,8 +291,17 @@ public class MainActivity extends Activity {
     }
 
     private void setupWebView() {
-        // Hardware layer -> smooth <video> playback / scrolling on weak GPUs
+        // Hardware layer -> smooth <video> playback / scrolling on weak GPUs.
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // Do not let an invisible renderer lose its priority while the
+        // foreground playback service is keeping audio alive.
+        if (Build.VERSION.SDK_INT >= 26) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, false);
+        }
+
+        // Exposes only one boolean state callback; no page content is passed
+        // into native code. This is installed before any URL is loaded.
+        webView.addJavascriptInterface(new PlaybackBridge(), "YTLiteBridge");
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -269,6 +351,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
+                resetPagePlaybackState();
                 view.evaluateJavascript(PAGE_JS, null);
             }
 
@@ -427,17 +510,39 @@ public class MainActivity extends Activity {
         stopService(new Intent(this, PlaybackService.class));
     }
 
+    private boolean shouldKeepPlaying() {
+        if (sExplicitlyStopped) return false;
+        if (isPagePlaying() || wasPagePlayingRecently()) return true;
+        // Fallback for an old/broken WebView that did not deliver a bridge
+        // event. Once the page reports state, prefer that app-specific state
+        // over AudioManager's device-wide isMusicActive() value.
+        return !hasPlaybackReport() && isAudioPlaying();
+    }
+
+    private void prepareBackgroundPlayback() {
+        if (keepPlaying || isFinishing() || !shouldKeepPlaying()) return;
+
+        // This must run before super.onPause(): by the time onStop() arrives,
+        // newer Android versions may reject a foreground-service start.
+        keepPlaying = true;
+        webView.onResume();
+        webView.evaluateJavascript(BG_ON_JS, null);
+        startPlaybackService();
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        // Home/Recents gives us this early callback, before YouTube gets a
+        // chance to change its media state because the window lost focus.
+        prepareBackgroundPlayback();
+        super.onUserLeaveHint();
+    }
+
     @Override
     protected void onPause() {
+        // Also covers screen-off, calls and other non-user transitions.
+        prepareBackgroundPlayback();
         super.onPause();
-        // Screen turning off / leaving the app while something is playing:
-        // start the foreground service *now*, while the app still counts as
-        // being in the foreground (required on newer Android versions).
-        keepPlaying = !isFinishing() && isAudioPlaying();
-        if (keepPlaying) {
-            webView.evaluateJavascript(BG_ON_JS, null);
-            startPlaybackService();
-        }
     }
 
     @Override
@@ -452,8 +557,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
-        // Only pause the WebView and trim the cache when nothing was playing.
-        // Pausing it while audio plays is what would cut the sound.
+        // A bridge event may have arrived between onPause() and onStop().
+        // Keep this fallback, but the normal service start happens above.
+        prepareBackgroundPlayback();
+        // Pausing WebView here while a video is active is what cuts audio.
         if (!keepPlaying) {
             webView.onPause();
             trimCacheIfNeeded();
@@ -466,6 +573,7 @@ public class MainActivity extends Activity {
             stopPlaybackService();
         }
         sWebView = null;
+        resetPagePlaybackState();
         webView.destroy();
         super.onDestroy();
     }
