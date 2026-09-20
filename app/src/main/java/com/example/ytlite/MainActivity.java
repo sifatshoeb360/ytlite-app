@@ -15,6 +15,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -76,29 +77,50 @@ public class MainActivity extends Activity {
 
     // Used by PlaybackService (notification Play/Pause button + auto-resume).
     static final String PLAY_JS =
-            "(function(){var v=document.querySelector('video');"
-            + "if(v&&v.paused){var p=v.play();if(p&&p.catch)p.catch(function(){})}})();";
+            "(function(){window.__ytlBg=Date.now();window.__ytlN=0;"
+            + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video'),"
+            + "r='p'+(p?1:0)+' v'+(v?1:0);"
+            + "if(v)r+=' paused='+(v.paused?1:0)+' rs='+v.readyState+' vis='+document.visibilityState;"
+            + "try{if(p&&typeof p.playVideo==='function'){p.playVideo();r+=' api'}"
+            + "else if(v){var q=v.play();if(q&&q.catch)q.catch(function(e){window.__ytlErr=e.name});r+=' el'}}"
+            + "catch(e){r+=' err='+e.name}"
+            + "return r})();";
     static final String PAUSE_JS =
-            "(function(){window.__ytlBg=0;var v=document.querySelector('video');"
-            + "if(v&&!v.paused)v.pause()})();";
+            "(function(){window.__ytlBg=0;"
+            + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video');"
+            + "if(p&&typeof p.pauseVideo==='function')p.pauseVideo();else if(v)v.pause()})();";
+    // Debug: read back what the page did after we pressed play.
+    static final String STATUS_JS =
+            "(function(){var v=document.querySelector('video');"
+            + "return v?('paused='+(v.paused?1:0)+' t='+Math.floor(v.currentTime)+' err='+(window.__ytlErr||'-')):'no video'})();";
 
     private static WebView sWebView; // set while the Activity exists
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    static void runJs(final String js) {
+    static void runJs(String js) {
+        runJs(js, null);
+    }
+
+    static void runJs(final String js, final ValueCallback<String> callback) {
         final WebView w = sWebView;
         if (w == null) return;
         MAIN.post(new Runnable() {
             @Override
             public void run() {
-                w.evaluateJavascript(js, null);
+                w.evaluateJavascript(js, callback);
             }
         });
+    }
+
+    static boolean hasWebView() {
+        return sWebView != null;
     }
 
     // Injected into every page. Compact on purpose (runs on a weak CPU).
     //  - Makes the page believe it is always visible, so YouTube does not
     //    pause playback when the screen turns off.
+    //  - While we are in background mode (window.__ytlBg set by the app),
+    //    ignores pause() calls made by the page itself.
     //  - Hides ad containers with CSS.
     //  - During a video ad: clicks Skip, mutes, speeds up and jumps to end.
     // YouTube changes its markup from time to time, so the selectors below
@@ -114,6 +136,8 @@ public class MainActivity extends Activity {
             + "var stop=function(e){if(e.target===window||e.target===document)e.stopImmediatePropagation()};"
             + "['visibilitychange','webkitvisibilitychange','blur','pagehide','freeze'].forEach(function(n){"
             + "window.addEventListener(n,stop,true);document.addEventListener(n,stop,true)});"
+            + "var op=HTMLMediaElement.prototype.pause;"
+            + "HTMLMediaElement.prototype.pause=function(){if(window.__ytlBg)return;return op.apply(this,arguments)};"
             + "var CSS='ytm-promoted-sparkles-web-renderer,ytm-promoted-video-renderer,"
             + "ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-renderer,"
             + "ytm-brand-video-singleton-renderer,#player-ads,.ytp-ad-overlay-container,"
