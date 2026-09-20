@@ -15,6 +15,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.webkit.ValueCallback;
 
 /**
  * Tiny foreground service. It does no playback itself — the WebView does.
@@ -48,6 +49,8 @@ public class PlaybackService extends Service {
     private long lastActive;
     private boolean userPaused;
     private boolean shownPlaying = true;
+    private int press;          // id of the latest Play press (debug)
+    private String dbg = "";   // debug line shown in the expanded notification
 
     private final Runnable ticker = new Runnable() {
         @Override
@@ -123,14 +126,59 @@ public class PlaybackService extends Service {
         if (isPlaying()) {
             userPaused = true;
             MainActivity.runJs(MainActivity.PAUSE_JS);
+            handler.removeCallbacks(refresh);
+            handler.postDelayed(refresh, 800);
         } else {
             userPaused = false;
             lastActive = SystemClock.elapsedRealtime();
             renewWakeLock();
-            MainActivity.runJs(MainActivity.PLAY_JS);
+            playWithDebug();
         }
-        handler.removeCallbacks(refresh);
-        handler.postDelayed(refresh, 800);
+    }
+
+    // Presses play in the page and reports what the page said (temporary
+    // debug info, shown when the notification is expanded).
+    private void playWithDebug() {
+        final int id = ++press;
+        dbg = "";
+        MainActivity.runJs(MainActivity.PLAY_JS, new ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String v) {
+                if (id == press) dbg = clean(v);
+            }
+        });
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (id != press) return;
+                MainActivity.runJs(MainActivity.STATUS_JS, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String v) {
+                        if (id != press) return;
+                        dbg += " | " + clean(v);
+                        updateNotification(isPlaying());
+                    }
+                });
+            }
+        }, 1200);
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (id == press && !dbg.contains("|")) {
+                    dbg = "no reply from page (webview "
+                            + (MainActivity.hasWebView() ? "alive" : "gone") + ")";
+                    updateNotification(isPlaying());
+                }
+            }
+        }, 3000);
+    }
+
+    private static String clean(String v) {
+        if (v == null) return "null";
+        if (v.length() >= 2 && v.startsWith("\"") && v.endsWith("\"")) {
+            return v.substring(1, v.length() - 1);
+        }
+        return v;
     }
 
     private boolean isPlaying() {
@@ -169,10 +217,13 @@ public class PlaybackService extends Service {
         Intent toggle = new Intent(this, PlaybackService.class).setAction(ACTION_TOGGLE);
         PendingIntent togglePi = PendingIntent.getService(this, 1, toggle, piFlags);
 
+        String status = playing ? "Playing in background" : "Paused";
         return builder
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle("YTLite")
-                .setContentText(playing ? "Playing in background" : "Paused")
+                .setContentText(status)
+                .setStyle(new Notification.BigTextStyle()
+                        .bigText(dbg.isEmpty() ? status : status + "\n" + dbg))
                 .setContentIntent(openPi)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .addAction(playing ? android.R.drawable.ic_media_pause
