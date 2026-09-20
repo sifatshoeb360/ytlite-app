@@ -1,0 +1,42 @@
+name: Build APK
+
+# Runs entirely on GitHub's servers — nothing is built on your own PC.
+# Triggers automatically on every push, and can also be run manually
+# from the "Actions" tab using "workflow_dispatch".
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      # Debug build = automatically signed with the built-in debug keystore,
+      # so the resulting APK can be installed directly on a phone without
+      # you needing to create/manage your own signing key.
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTLite-apk
+          path: app/build/outputs/apk/debug/*.apk
