@@ -84,6 +84,7 @@ public class MainActivity extends Activity {
             + "try{if(p&&typeof p.playVideo==='function'){p.playVideo();r+=' api'}"
             + "else if(v){var q=v.play();if(q&&q.catch)q.catch(function(e){window.__ytlErr=e.name});r+=' el'}}"
             + "catch(e){r+=' err='+e.name}"
+            + "if(window.__ytlNudge)setTimeout(window.__ytlNudge,400);"
             + "return r})();";
     static final String PAUSE_JS =
             "(function(){window.__ytlBg=0;"
@@ -121,6 +122,9 @@ public class MainActivity extends Activity {
     //    pause playback when the screen turns off.
     //  - While we are in background mode (window.__ytlBg set by the app),
     //    ignores pause() calls made by the page itself.
+    //  - Gives every new video one tiny silent seek ~1.5 s after it starts
+    //    (same effect as dragging the progress bar, which was observed to
+    //    make background audio work).
     //  - Hides ad containers with CSS.
     //  - During a video ad: clicks Skip, mutes, speeds up and jumps to end.
     // YouTube changes its markup from time to time, so the selectors below
@@ -159,6 +163,15 @@ public class MainActivity extends Activity {
             + "if(!window.__ytlBg||!v||v.tagName!=='VIDEO'||v.ended||Date.now()-window.__ytlBg>6000"
             + "||(window.__ytlN=(window.__ytlN||0)+1)>5)return;"
             + "setTimeout(function(){var pr=v.play();if(pr&&pr.catch)pr.catch(function(){})},150)},true);"
+            + "window.__ytlNudge=function(){var p=document.querySelector('.html5-video-player'),"
+            + "v=document.querySelector('video');try{"
+            + "if(p&&typeof p.seekTo==='function'&&typeof p.getCurrentTime==='function')p.seekTo(p.getCurrentTime(),true);"
+            + "else if(v&&isFinite(v.currentTime))v.currentTime=v.currentTime}catch(e){}};"
+            + "document.addEventListener('playing',function(e){var v=e.target,"
+            + "p=document.querySelector('.html5-video-player');"
+            + "if(!v||v.tagName!=='VIDEO'||(p&&p.classList.contains('ad-showing'))"
+            + "||window.__ytlPrimed===location.href)return;"
+            + "window.__ytlPrimed=location.href;setTimeout(window.__ytlNudge,1500)},true);"
             + "setInterval(tick,400)})();";
 
     private WebView webView;
