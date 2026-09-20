@@ -1,8 +1,5 @@
 name: Build APK
 
-# Runs entirely on GitHub's servers — nothing is built on your own PC.
-# Triggers automatically on every push, and can also be run manually
-# from the "Actions" tab using "workflow_dispatch".
 on:
   push:
     branches: [ main ]
@@ -21,17 +18,20 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest already ships with an Android SDK — no need for the
+      # android-actions/setup-android action (it fails trying to install a
+      # deprecated 'tools' package). Just make sure the SDK platform/build
+      # tools our compileSdk needs are present.
+      - name: Install required Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
 
-      # Debug build = automatically signed with the built-in debug keystore,
-      # so the resulting APK can be installed directly on a phone without
-      # you needing to create/manage your own signing key.
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
