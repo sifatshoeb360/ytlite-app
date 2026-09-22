@@ -1,0 +1,39 @@
+YT Lite - background playback candidate fix
+
+This ZIP contains source code, NOT an installable APK.
+
+1. Extract the ZIP.
+2. Copy the contents into the root of your existing ytlite-app project,
+   replacing matching files. Keep your existing .git directory.
+3. IMPORTANT: include the new file:
+   app/src/main/java/com/example/ytlite/PlaybackWebView.java
+   and the updated app/src/main/res/layout/activity_main.xml.
+4. If using GitHub Upload files, upload the extracted contents into the
+   repository root, not a nested folder. Include hidden .github if needed.
+5. Commit/upload to your working branch. The existing Build APK workflow
+   runs for main and arena/** branches; for other branches run it manually.
+6. After Build APK succeeds, open that run -> Artifacts -> YTLite-apk.
+   Download/extract the artifact ZIP and install app-debug.apk.
+
+Changes:
+- Preserve native WebView window visibility while background playback is
+  intended. JS document visibility overrides alone do not control Chromium.
+- Restore YouTube player seekTo priming, with an element fallback on errors.
+- Retain explicit Pause protection and Play fallback.
+
+Validation:
+- 8 JavaScript regression tests pass: node --test tests/*.test.cjs
+- Android build and physical-device playback NOT verified for this revision.
+
+Device checks:
+- Start video, do NOT seek, press Home, listen for at least 60 seconds.
+- Repeat after manually seeking; verify the old workaround still works.
+- Turn screen off for at least 2 minutes.
+- Notification Pause must remain paused; Play must resume.
+- Pause in the page before pressing Home: it must not start playing.
+- Test the next video and fullscreen playback too.
+
+If it still fails, report phone model, Android version, Android System
+WebView version, whether the notification appears, and whether audio stops
+immediately or after a delay. This is a WebView workaround, not a native
+independent audio player, so device testing is essential.

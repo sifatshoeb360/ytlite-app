@@ -51,3 +51,12 @@ test('ordinary nudge does not resume paused video',()=>{
   const p=page({paused:true});assert.equal(p.context.__ytlNudge(),false);
   assert.equal(p.video.currentTime,10);
 });
+test('priming uses the YouTube seek API when available',()=>{
+  const p=page();let target;
+  p.player.seekTo=(value)=>{target=value};
+  p.context.__ytlNudge();assert.equal(target,10.25);
+});
+test('priming falls back if the YouTube seek API throws',()=>{
+  const p=page();p.player.seekTo=()=>{throw Error('unavailable')};
+  p.context.__ytlNudge();assert.equal(p.video.currentTime,10.25);
+});
