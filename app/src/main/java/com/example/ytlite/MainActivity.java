@@ -89,14 +89,18 @@ public class MainActivity extends Activity {
     static final String PLAY_JS =
             "(function(){window.__ytlBg=Date.now();window.__ytlN=0;"
             + "window.__ytlUserPause=0;window.__ytlErr='';"
-            + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video'),"
-            + "r='p'+(p?1:0)+' v'+(v?1:0);"
-            + "if(v)r+=' paused='+(v.paused?1:0)+' rs='+v.readyState+' vis='+document.visibilityState;"
-            + "try{if(p&&typeof p.playVideo==='function'){p.playVideo();r+=' api'}"
-            + "else if(v){var q=v.play();if(q&&q.catch)q.catch(function(e){window.__ytlErr=e.name});r+=' el'}}"
-            + "catch(e){window.__ytlErr=e.name;r+=' err='+e.name}"
-            + "if(window.__ytlNudge)setTimeout(function(){window.__ytlNudge()},400);"
-            + "return r})();";
+            + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video');"
+            // Recover the media pipeline even if playback has already paused.
+            // Do this before play(): on affected WebViews play alone can stall.
+            + "if(v&&v.paused&&window.__ytlNudge)window.__ytlNudge(true);"
+            + "try{if(p&&typeof p.playVideo==='function')p.playVideo()}"
+            + "catch(e){window.__ytlErr=e.name}"
+            // Some mobile players expose playVideo but silently ignore it.
+            + "try{if(v&&v.paused){var q=v.play();"
+            + "if(q&&q.catch)q.catch(function(e){window.__ytlErr=e.name})}}"
+            + "catch(e){window.__ytlErr=e.name}"
+            + "if(window.__ytlReport)window.__ytlReport();"
+            + "return window.__ytlErr})();";
     static final String PAUSE_JS =
             "(function(){window.__ytlBg=0;window.__ytlUserPause=Date.now();"
             + "var p=document.querySelector('.html5-video-player'),v=document.querySelector('video');"
@@ -200,7 +204,7 @@ public class MainActivity extends Activity {
     //    pause playback when the screen turns off.
     //  - While we are in background mode (window.__ytlBg set by the app),
     //    ignores pause() calls made by the page itself.
-    //  - Gives every new video one tiny silent seek ~1.5 s after it starts
+    //  - Gives every new video one tiny seek after media becomes seekable
     //    (same effect as dragging the progress bar, which was observed to
     //    make background audio work).
     //  - Hides ad containers with CSS.
@@ -217,34 +221,38 @@ public class MainActivity extends Activity {
             + "ddEventListener(t,e,!0),document.addEventListener(t,e,!0)});var t=HTMLMediaElement.prototype.pause;H"
             + "TMLMediaElement.prototype.pause=function(){if(!window.__ytlBg||window.__ytlUserPause)return t.apply("
             + "this,arguments)};var n=0,i=!1,o=1,r=\"\",d=\"\";window.__ytlReport=function(){u(document.querySelector(\""
-            + "video\"),!1)},window.__ytlNudge=function(){var e=document.querySelector(\".html5-video-player\"),t=docu"
-            + "ment.querySelector(\"video\");try{if(!t||t.paused||t.ended||t.readyState<2||e&&e.classList.contains(\"a"
-            + "d-showing\"))return!1;var n=Number(t.currentTime);if(!isFinite(n))return!1;var i=n+.25,o=Number(t.dur"
-            + "ation);if(isFinite(o)){if(o<=.5)return!1;i>=o-.05&&(i=Math.max(0,n-.25))}return!(Math.abs(i-n)<.01)&"
-            + "&(e&&\"function\"==typeof e.seekTo?e.seekTo(i,!0):t.currentTime=i,!0)}catch(e){return!1}},document.add"
-            + "EventListener(\"play\",m,!0),document.addEventListener(\"playing\",m,!0),document.addEventListener(\"paus"
-            + "e\",function(e){var t=e.target;t&&\"VIDEO\"===t.tagName&&(u(t,!1),!window.__ytlBg||t.ended||Date.now()-"
-            + "window.__ytlBg>1e4||(window.__ytlN=(window.__ytlN||0)+1)>8||setTimeout(function(){var e=t.play();e&&"
-            + "e.catch&&e.catch(function(){})},150))},!0),document.addEventListener(\"ended\",function(e){u(e.target,"
-            + "!0)},!0),y(),setInterval(y,400)}function u(e,t){if(e&&\"VIDEO\"===e.tagName){var n=!e.paused&&!e.ended"
-            + ",i=!n&&(t||!window.__ytlBg||Date.now()-(window.__ytlUserPause||0)<1500),o=(n?\"1\":\"0\")+(i?\"1\":\"0\");if"
-            + "(o!==r){r=o;try{window.YTLiteBridge&&window.YTLiteBridge.onPlaybackState(n,i)}catch(e){}}}}function "
-            + "l(e,t){try{var n=e&&\"function\"==typeof e.getVideoData&&e.getVideoData();if(n&&n.video_id)return n.vi"
-            + "deo_id}catch(e){}return location.pathname+location.search+\"|\"+(isFinite(t.duration)?Math.floor(10*t."
-            + "duration):\"live\")}function s(e,t){if(!(!t||t.paused||t.ended||e&&e.classList.contains(\"ad-showing\"))"
-            + "){var n=l(e,t);if(window.__ytlPrimed!==n&&d!==n){d=n;var i=0;setTimeout(function e(){var t=document."
-            + "querySelector(\".html5-video-player\"),o=document.querySelector(\"video\");o&&l(t,o)===n?window.__ytlNud"
-            + "ge()?(window.__ytlPrimed=n,d=\"\"):++i<5?setTimeout(e,500):d=\"\":d=\"\"},500)}}}function y(){if(!document"
-            + ".getElementById(\"ytl-css\")){var e=document.head||document.documentElement;if(e){var t=document.creat"
-            + "eElement(\"style\");t.id=\"ytl-css\",t.textContent=\"ytm-promoted-sparkles-web-renderer,ytm-promoted-vide"
-            + "o-renderer,ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-renderer,ytm-brand-video-singleton"
-            + "-renderer,#player-ads,.ytp-ad-overlay-container,.ytp-ad-image-overlay{display:none!important}\",e.app"
-            + "endChild(t)}}var r=document.querySelector(\".html5-video-player\"),a=document.querySelector(\"video\");i"
-            + "f(r&&a)if(u(a,!1),a.paused||s(r,a),r.classList.contains(\"ad-showing\")){var d=document.querySelector("
-            + "\".ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button\");d&&d.click(),n||(i=a.muted,o=a"
-            + ".playbackRate,n=1),a.muted=!0,a.playbackRate=16,isFinite(a.duration)&&a.duration>0&&(a.currentTime=a"
-            + ".duration)}else n&&(a.playbackRate=o,a.muted=i,n=0)}function m(e){var t=e.target,n=document.querySel"
-            + "ector(\".html5-video-player\");t&&\"VIDEO\"===t.tagName&&(u(t,!1),s(n,t))}}();";
+            + "video\"),!1)},window.__ytlNudge=function(recover){var p=document.querySelector('.html5-video-player')"
+            + ",v=document.querySelector('video');try{if(!v||v.ended||v.seeking||v.readyState<2||(!recover&&v.pause"
+            + "d)||window.__ytlUserPause||(p&&p.classList.contains('ad-showing')))return false;var from=Number(v.cu"
+            + "rrentTime),ranges=v.seekable;if(!isFinite(from)||!ranges||!ranges.length)return false;var target=fro"
+            + "m;for(var j=0;j<ranges.length;j++){var low=ranges.start(j)+.05,high=ranges.end(j)-.05;if(from>=range"
+            + "s.start(j)&&from<=ranges.end(j)&&high>low){target=from+.25<=high?from+.25:from-.25>=low?from-.25:fro"
+            + "m;break;}}if(Math.abs(target-from)<.01)return false;v.currentTime=target;return true;}catch(e){retur"
+            + "n false}},document.addEventListener(\"play\",m,!0),document.addEventListener(\"playing\",m,!0),document."
+            + "addEventListener(\"pause\",function(e){var t=e.target;t&&\"VIDEO\"===t.tagName&&(u(t,!1),!window.__ytlBg"
+            + "||t.ended||Date.now()-window.__ytlBg>1e4||(window.__ytlN=(window.__ytlN||0)+1)>8||setTimeout(functio"
+            + "n(){if(!window.__ytlBg||window.__ytlUserPause||t.ended||t!==document.querySelector(\"video\"))return;t"
+            + "ry{var e=t.play();e&&e.catch&&e.catch(function(){})}catch(e){}},150))},!0),document.addEventListener"
+            + "(\"ended\",function(e){u(e.target,!0)},!0),y(),setInterval(y,400)}function u(e,t){if(e&&\"VIDEO\"===e.ta"
+            + "gName){var n=!e.paused&&!e.ended,i=!n&&(t||!window.__ytlBg||Date.now()-(window.__ytlUserPause||0)<15"
+            + "00),o=(n?\"1\":\"0\")+(i?\"1\":\"0\");if(o!==r){r=o;try{window.YTLiteBridge&&window.YTLiteBridge.onPlaybackS"
+            + "tate(n,i)}catch(e){}}}}function l(e,t){try{var n=e&&\"function\"==typeof e.getVideoData&&e.getVideoDat"
+            + "a();if(n&&n.video_id)return n.video_id}catch(e){}return location.pathname+location.search+\"|\"+(isFin"
+            + "ite(t.duration)?Math.floor(10*t.duration):\"live\")}function s(e,t){if(!(!t||t.paused||t.ended||e&&e.c"
+            + "lassList.contains(\"ad-showing\"))){var n=l(e,t);if(window.__ytlPrimed!==n&&d!==n){d=n;var i=0;setTime"
+            + "out(function e(){var t=document.querySelector(\".html5-video-player\"),o=document.querySelector(\"video"
+            + "\");o&&l(t,o)===n?window.__ytlNudge()?(window.__ytlPrimed=n,d=\"\"):++i<5?setTimeout(e,500):d=\"\":d=\"\"},"
+            + "500)}}}function y(){if(!document.getElementById(\"ytl-css\")){var e=document.head||document.documentEl"
+            + "ement;if(e){var t=document.createElement(\"style\");t.id=\"ytl-css\",t.textContent=\"ytm-promoted-sparkle"
+            + "s-web-renderer,ytm-promoted-video-renderer,ytm-companion-ad-renderer,ytm-ad-slot-renderer,ad-slot-re"
+            + "nderer,ytm-brand-video-singleton-renderer,#player-ads,.ytp-ad-overlay-container,.ytp-ad-image-overla"
+            + "y{display:none!important}\",e.appendChild(t)}}var r=document.querySelector(\".html5-video-player\"),a=d"
+            + "ocument.querySelector(\"video\");if(r&&a)if(u(a,!1),a.paused||s(r,a),r.classList.contains(\"ad-showing\""
+            + ")){var d=document.querySelector(\".ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button\""
+            + ");d&&d.click(),n||(i=a.muted,o=a.playbackRate,n=1),a.muted=!0,a.playbackRate=16,isFinite(a.duration)"
+            + "&&a.duration>0&&(a.currentTime=a.duration)}else n&&(a.playbackRate=o,a.muted=i,n=0)}function m(e){va"
+            + "r t=e.target,n=document.querySelector(\".html5-video-player\");t&&\"VIDEO\"===t.tagName&&(window.__ytlUs"
+            + "erPause=0,u(t,!1),s(n,t))}}();";
 
     private WebView webView;
     private ProgressBar progressBar;
